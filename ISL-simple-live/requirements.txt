@@ -1,5 +1,5 @@
 # requirements.txt
-# for local use and Streamlit Cloud deployment
+# for use
 
 tensorflow==2.15.0
 keras==2.15.0

@@ -9,10 +9,14 @@ import json
 import mediapipe as mp
 from datetime import datetime
 
-# confirm your path
-MODELS_PATH   = r"data/models"          # <---
-SPLITS_PATH   = r"data/splits"          # <---
-NEW_DATA_PATH = r"data/new_samples"     # <---
+st.set_page_config(
+    page_title="ISL Live Recognition",
+    layout="wide"
+)
+
+MODELS_PATH   = r"data/models"          
+SPLITS_PATH   = r"data/splits"          
+NEW_DATA_PATH = r"data/new_samples"     
 os.makedirs(NEW_DATA_PATH, exist_ok=True)
 
 class TemporalAttention(tf.keras.layers.Layer):

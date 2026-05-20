@@ -1,7 +1,7 @@
 # "ISL-include-50" folder
 
 
-Inside the "ISL-include-50" folder... you can run the live recogntion to:
+Inside this repo... you can run the live recogntion to:
 
 ⭐ browse all 50 ISL words
 

@@ -9,10 +9,7 @@ import json
 import mediapipe as mp
 from datetime import datetime
 
-st.set_page_config(
-    page_title="ISL Live Recognition",
-    layout="wide"
-)
+st.set_page_config(page_title="ISL Live Recognition", layout="wide")
 
 MODELS_PATH   = r"data/models"          
 SPLITS_PATH   = r"data/splits"          
@@ -125,7 +122,6 @@ for k, v in {
     if k not in st.session_state:
         st.session_state[k] = v
 
-st.set_page_config(page_title="ISL Live Recognition", layout="wide")
 st.markdown("<style>.block-container{padding-top:1.2rem;}</style>", unsafe_allow_html=True)
 
 st.title("ISL Live Recognition")

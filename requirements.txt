@@ -7,3 +7,8 @@ streamlit==1.57.0
 opencv-python-headless==4.11.0.86
 numpy==1.26.4
 scikit-learn
+streamlit==1.57.0
+pandas
+matplotlib
+h5py
+protobuf==4.25.9

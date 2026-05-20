@@ -30,7 +30,8 @@ class TemporalAttention(tf.keras.layers.Layer):
 def load_assets():
     m = tf.keras.models.load_model(
         os.path.join(MODELS_PATH, 'best_model_v2.h5'),
-        custom_objects={'TemporalAttention': TemporalAttention}
+        custom_objects={'TemporalAttention': TemporalAttention},
+        compile=False
     )
     with open(os.path.join(SPLITS_PATH, 'splits.json'), 'r') as f:
         splits = json.load(f)

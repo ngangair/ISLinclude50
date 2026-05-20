@@ -18,7 +18,6 @@ SPLITS_PATH   = "data/splits"
 NEW_DATA_PATH = "data/new_samples"
 os.makedirs(NEW_DATA_PATH, exist_ok=True)
 
-# ─── CUSTOM ATTENTION LAYER ───
 class TemporalAttention(tf.keras.layers.Layer):
     def __init__(self, units=64, **kwargs):
         super().__init__(**kwargs)
@@ -30,7 +29,6 @@ class TemporalAttention(tf.keras.layers.Layer):
         context = tf.reduce_sum(inputs * weights, axis=1)
         return context, weights
 
-# ─── LOAD MODEL ───
 @st.cache_resource
 def load_assets():
     m = tf.keras.models.load_model(
@@ -46,7 +44,6 @@ def load_assets():
 
 model, idx_to_word, ALL_CLASSES = load_assets()
 
-# ─── FEATURE EXTRACTION ───
 def normalize_hand(h):
     if h is None: return np.zeros(63, dtype=np.float32)
     c = np.array([[lm.x, lm.y, lm.z] for lm in h.landmark], dtype=np.float32)
@@ -88,7 +85,6 @@ def extract_frame_features(results, prev=None):
     velocity = static - prev if prev is not None else np.zeros(162, dtype=np.float32)
     return np.concatenate([static, velocity]).astype(np.float32)
 
-# ─── DATA SAVING ───
 def save_sample(word, sequence_30frames):
     word_dir = os.path.join(NEW_DATA_PATH, word)
     os.makedirs(word_dir, exist_ok=True)
@@ -107,11 +103,6 @@ def count_by_word():
             if n > 0: counts[word] = n
     return counts
 
-# ─── VIDEO PROCESSOR ───
-# TOPIC: VideoProcessorBase
-# WHY: streamlit-webrtc calls recv() for every frame from the browser webcam.
-# We subclass it to inject MediaPipe + model inference into the stream.
-# Results are stored as instance attributes — Streamlit reads them via ctx.video_processor.
 class ISLProcessor(VideoProcessorBase):
     def __init__(self):
         self.holistic = mp.solutions.holistic.Holistic(
@@ -122,11 +113,10 @@ class ISLProcessor(VideoProcessorBase):
         self.sequence_buf  = []
         self.prev_features = None
         self.frame_count   = 0
-        # These are read by Streamlit UI outside recv()
         self.current_word  = ""
         self.current_conf  = 0.0
-        self.new_word      = None    # set when a NEW word is detected; UI reads & clears it
-        self.snapshot      = None    # sequence snapshot when new word detected
+        self.new_word      = None    
+        self.snapshot      = None    
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -147,18 +137,15 @@ class ISLProcessor(VideoProcessorBase):
             idx   = int(np.argmax(probs))
             self.current_conf = float(probs[idx])
             self.current_word = idx_to_word.get(idx, "?")
-            # Signal a new word to the UI (UI reads & clears this)
             if self.current_conf >= 0.55:
                 self.new_word = self.current_word
                 self.snapshot = list(self.sequence_buf)
 
-        # Draw landmarks and overlay on frame
         if results.left_hand_landmarks:
             self.mp_draw.draw_landmarks(img, results.left_hand_landmarks, mp.solutions.holistic.HAND_CONNECTIONS)
         if results.right_hand_landmarks:
             self.mp_draw.draw_landmarks(img, results.right_hand_landmarks, mp.solutions.holistic.HAND_CONNECTIONS)
 
-        # Word overlay on video
         color = (0, 255, 0) if self.current_conf >= 0.55 else (0, 165, 255)
         cv2.rectangle(img, (0, 0), (320, 60), (0, 0, 0), -1)
         cv2.putText(img, f"{self.current_word}  {self.current_conf*100:.0f}%",
@@ -166,12 +153,10 @@ class ISLProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# ─── SESSION STATE ───
 for k, v in {"sentence":[], "last_word":"", "save_log":[],
              "pending_confirmations":[], "confirm_id_counter":0}.items():
     if k not in st.session_state: st.session_state[k] = v
 
-# ─── UI ───
 st.markdown("<style>.block-container{padding-top:1.2rem;}</style>", unsafe_allow_html=True)
 st.title("ISL Live Recognition")
 st.caption("Click START to activate your camera — sign — confirm or correct recognized words")
@@ -185,10 +170,28 @@ cam_col, panel_col = st.columns([3, 2])
 
 with cam_col:
     st.subheader("Camera Feed")
-    # TOPIC: RTCConfiguration with STUN server
-    # WHY: WebRTC needs a STUN server to negotiate the connection between the
-    # user's browser and the Streamlit Cloud server. Google's free STUN server works.
-    RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+    
+    RTC_CONFIG = RTCConfiguration({
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {
+                "urls": ["turn:openrelay.metered.ca:80"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject"
+            },
+            {
+                "urls": ["turn:openrelay.metered.ca:443"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject"
+            },
+            {
+                "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject"
+            }
+        ]
+    })
+
     ctx = webrtc_streamer(
         key="isl",
         video_processor_factory=ISLProcessor,
@@ -242,11 +245,6 @@ with panel_col:
     else:
         st.caption("*No samples saved yet*")
 
-# ─── READ FROM VIDEO PROCESSOR ───
-# TOPIC: Reading processor state from outside recv()
-# WHY: recv() runs in a background thread. We read its output here
-# in the main Streamlit thread to update the UI and session_state.
-# This is the standard streamlit-webrtc pattern for passing data out.
 if ctx.video_processor:
     vp = ctx.video_processor
     if vp.current_word:
@@ -254,7 +252,6 @@ if ctx.video_processor:
         sign_ph.markdown(f"### {vp.current_word}")
         conf_ph.progress(min(vp.current_conf, 1.0), text=f"{vp.current_conf*100:.0f}% confident")
 
-    # Pick up new word detections
     if vp.new_word and vp.new_word != st.session_state.last_word:
         word    = vp.new_word
         display = word.replace('_', ' ')
@@ -270,7 +267,7 @@ if ctx.video_processor:
             st.session_state.pending_confirmations.pop(0)
         if len(st.session_state.sentence) > 12:
             st.session_state.sentence.pop(0)
-        vp.new_word = None   # clear so we don't pick it up again
+        vp.new_word = None   
 
     if st.session_state.sentence:
         sent_ph.markdown("**" + "  →  ".join(st.session_state.sentence) + "**")

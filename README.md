@@ -1,7 +1,8 @@
 # "ISL-include-50" folder
 
+https://isl-include-50.streamlit.app/
 
-Inside this repo... you can run the live recogntion to:
+You can run the live recogntion to...
 
 ⭐ browse all 50 ISL words
 

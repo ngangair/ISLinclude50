@@ -7,15 +7,18 @@ import numpy as np
 import tensorflow as tf
 import json
 import mediapipe as mp
+import av
 from datetime import datetime
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
 st.set_page_config(page_title="ISL Live Recognition", layout="wide")
 
-MODELS_PATH   = r"data/models"          
-SPLITS_PATH   = r"data/splits"          
-NEW_DATA_PATH = r"data/new_samples"     
+MODELS_PATH   = "data/models"
+SPLITS_PATH   = "data/splits"
+NEW_DATA_PATH = "data/new_samples"
 os.makedirs(NEW_DATA_PATH, exist_ok=True)
 
+# ─── CUSTOM ATTENTION LAYER ───
 class TemporalAttention(tf.keras.layers.Layer):
     def __init__(self, units=64, **kwargs):
         super().__init__(**kwargs)
@@ -27,6 +30,7 @@ class TemporalAttention(tf.keras.layers.Layer):
         context = tf.reduce_sum(inputs * weights, axis=1)
         return context, weights
 
+# ─── LOAD MODEL ───
 @st.cache_resource
 def load_assets():
     m = tf.keras.models.load_model(
@@ -42,11 +46,11 @@ def load_assets():
 
 model, idx_to_word, ALL_CLASSES = load_assets()
 
+# ─── FEATURE EXTRACTION ───
 def normalize_hand(h):
     if h is None: return np.zeros(63, dtype=np.float32)
     c = np.array([[lm.x, lm.y, lm.z] for lm in h.landmark], dtype=np.float32)
-    c -= c[0]
-    s = np.linalg.norm(c[9])
+    c -= c[0]; s = np.linalg.norm(c[9])
     if s > 1e-6: c /= s
     return c.flatten()
 
@@ -54,9 +58,7 @@ def compute_angles(h):
     if h is None: return np.zeros(10, dtype=np.float32)
     lm = h.landmark
     def ang(a, b, c):
-        va=np.array([lm[a].x,lm[a].y,lm[a].z])
-        vb=np.array([lm[b].x,lm[b].y,lm[b].z])
-        vc=np.array([lm[c].x,lm[c].y,lm[c].z])
+        va=np.array([lm[a].x,lm[a].y,lm[a].z]); vb=np.array([lm[b].x,lm[b].y,lm[b].z]); vc=np.array([lm[c].x,lm[c].y,lm[c].z])
         ba=va-vb; bc=vc-vb
         return np.arccos(np.clip(np.dot(ba,bc)/(np.linalg.norm(ba)*np.linalg.norm(bc)+1e-6),-1,1))
     return np.array([ang(1,2,3),ang(2,3,4),ang(5,6,7),ang(6,7,8),ang(9,10,11),
@@ -72,35 +74,28 @@ def compute_distances(h):
 def compute_palm_normal(h):
     if h is None: return np.zeros(3, dtype=np.float32)
     lm = h.landmark
-    w=np.array([lm[0].x,lm[0].y,lm[0].z])
-    i=np.array([lm[5].x,lm[5].y,lm[5].z])
-    p=np.array([lm[17].x,lm[17].y,lm[17].z])
-    n = np.cross(i-w, p-w)
-    mag = np.linalg.norm(n)
+    w=np.array([lm[0].x,lm[0].y,lm[0].z]); i=np.array([lm[5].x,lm[5].y,lm[5].z]); p=np.array([lm[17].x,lm[17].y,lm[17].z])
+    n = np.cross(i-w, p-w); mag = np.linalg.norm(n)
     return (n/mag if mag>1e-6 else n).astype(np.float32)
 
 def extract_frame_features(results, prev=None):
     static = np.concatenate([
-        normalize_hand(results.left_hand_landmarks),
-        normalize_hand(results.right_hand_landmarks),
-        compute_angles(results.left_hand_landmarks),
-        compute_angles(results.right_hand_landmarks),
-        compute_distances(results.left_hand_landmarks),
-        compute_distances(results.right_hand_landmarks),
-        compute_palm_normal(results.left_hand_landmarks),
-        compute_palm_normal(results.right_hand_landmarks),
+        normalize_hand(results.left_hand_landmarks), normalize_hand(results.right_hand_landmarks),
+        compute_angles(results.left_hand_landmarks), compute_angles(results.right_hand_landmarks),
+        compute_distances(results.left_hand_landmarks), compute_distances(results.right_hand_landmarks),
+        compute_palm_normal(results.left_hand_landmarks), compute_palm_normal(results.right_hand_landmarks),
     ])
     velocity = static - prev if prev is not None else np.zeros(162, dtype=np.float32)
     return np.concatenate([static, velocity]).astype(np.float32)
 
+# ─── DATA SAVING ───
 def save_sample(word, sequence_30frames):
-    word_dir  = os.path.join(NEW_DATA_PATH, word)
+    word_dir = os.path.join(NEW_DATA_PATH, word)
     os.makedirs(word_dir, exist_ok=True)
-    existing  = len([f for f in os.listdir(word_dir) if f.endswith('.npy')])
+    existing = len([f for f in os.listdir(word_dir) if f.endswith('.npy')])
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filepath  = os.path.join(word_dir, f"{word}_{timestamp}_{existing:03d}.npy")
-    np.save(filepath, np.array(sequence_30frames, dtype=np.float32))
-    return filepath
+    np.save(os.path.join(word_dir, f"{word}_{timestamp}_{existing:03d}.npy"),
+            np.array(sequence_30frames, dtype=np.float32))
 
 def count_by_word():
     counts = {}
@@ -112,23 +107,77 @@ def count_by_word():
             if n > 0: counts[word] = n
     return counts
 
-for k, v in {
-    "sentence":              [],
-    "last_word":             "",
-    "save_log":              [],
-    "pending_confirmations": [],
-    "confirm_id_counter":    0,
-}.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+# ─── VIDEO PROCESSOR ───
+# TOPIC: VideoProcessorBase
+# WHY: streamlit-webrtc calls recv() for every frame from the browser webcam.
+# We subclass it to inject MediaPipe + model inference into the stream.
+# Results are stored as instance attributes — Streamlit reads them via ctx.video_processor.
+class ISLProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.holistic = mp.solutions.holistic.Holistic(
+            static_image_mode=False, model_complexity=1,
+            min_detection_confidence=0.5, min_tracking_confidence=0.5
+        )
+        self.mp_draw       = mp.solutions.drawing_utils
+        self.sequence_buf  = []
+        self.prev_features = None
+        self.frame_count   = 0
+        # These are read by Streamlit UI outside recv()
+        self.current_word  = ""
+        self.current_conf  = 0.0
+        self.new_word      = None    # set when a NEW word is detected; UI reads & clears it
+        self.snapshot      = None    # sequence snapshot when new word detected
 
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = self.holistic.process(rgb)
+
+        features           = extract_frame_features(results, self.prev_features)
+        self.prev_features = features[:162]
+        self.sequence_buf.append(features)
+        if len(self.sequence_buf) > 30:
+            self.sequence_buf.pop(0)
+
+        self.frame_count += 1
+        if len(self.sequence_buf) == 30 and self.frame_count % 5 == 0:
+            X     = np.array(self.sequence_buf, dtype=np.float32)[np.newaxis, ...]
+            probs = model(X, training=False).numpy()[0]
+            idx   = int(np.argmax(probs))
+            self.current_conf = float(probs[idx])
+            self.current_word = idx_to_word.get(idx, "?")
+            # Signal a new word to the UI (UI reads & clears this)
+            if self.current_conf >= 0.55:
+                self.new_word = self.current_word
+                self.snapshot = list(self.sequence_buf)
+
+        # Draw landmarks and overlay on frame
+        if results.left_hand_landmarks:
+            self.mp_draw.draw_landmarks(img, results.left_hand_landmarks, mp.solutions.holistic.HAND_CONNECTIONS)
+        if results.right_hand_landmarks:
+            self.mp_draw.draw_landmarks(img, results.right_hand_landmarks, mp.solutions.holistic.HAND_CONNECTIONS)
+
+        # Word overlay on video
+        color = (0, 255, 0) if self.current_conf >= 0.55 else (0, 165, 255)
+        cv2.rectangle(img, (0, 0), (320, 60), (0, 0, 0), -1)
+        cv2.putText(img, f"{self.current_word}  {self.current_conf*100:.0f}%",
+                    (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+# ─── SESSION STATE ───
+for k, v in {"sentence":[], "last_word":"", "save_log":[],
+             "pending_confirmations":[], "confirm_id_counter":0}.items():
+    if k not in st.session_state: st.session_state[k] = v
+
+# ─── UI ───
 st.markdown("<style>.block-container{padding-top:1.2rem;}</style>", unsafe_allow_html=True)
-
 st.title("ISL Live Recognition")
-st.caption("⏬ Scroll down to... sign to your webcam... and to see all 50 words")
+st.caption("Click START to activate your camera — sign — confirm or correct recognized words")
 
 m1, m2 = st.columns(2)
-m1.metric("Dataset",   "INCLUDE50")
+m1.metric("Dataset", "INCLUDE50")
 m2.metric("ISL Signs", "50 Classes")
 st.divider()
 
@@ -136,22 +185,29 @@ cam_col, panel_col = st.columns([3, 2])
 
 with cam_col:
     st.subheader("Camera Feed")
-    frame_placeholder = st.empty()
+    # TOPIC: RTCConfiguration with STUN server
+    # WHY: WebRTC needs a STUN server to negotiate the connection between the
+    # user's browser and the Streamlit Cloud server. Google's free STUN server works.
+    RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+    ctx = webrtc_streamer(
+        key="isl",
+        video_processor_factory=ISLProcessor,
+        rtc_configuration=RTC_CONFIG,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
 
 with panel_col:
-
     st.subheader("Recognized Sign")
-    sign_placeholder = st.empty()
-    conf_placeholder = st.empty()
-    sign_placeholder.markdown("### —")
-    conf_placeholder.progress(0.0, text="Waiting...")
-
+    sign_ph = st.empty()
+    conf_ph = st.empty()
+    sign_ph.markdown("### —")
+    conf_ph.progress(0.0, text="Waiting...")
     st.markdown("---")
 
     st.subheader("Recognized Words")
-    sent_placeholder = st.empty()
-    sent_placeholder.markdown("*Start signing to build a sentence...*")
-
+    sent_ph = st.empty()
+    sent_ph.markdown("*Start signing to build a sentence...*")
     st.markdown("---")
 
     st.subheader("Select Words")
@@ -159,58 +215,73 @@ with panel_col:
 
     if st.session_state.pending_confirmations:
         for item in list(st.session_state.pending_confirmations):
-            col_word, col_yes, col_no = st.columns([3, 1, 1])
-            col_word.markdown(f"**{item['display']}**")
-
-            if col_yes.button("✅ Yes", key=f"yes_{item['id']}"):
+            c1, c2, c3 = st.columns([3, 1, 1])
+            c1.markdown(f"**{item['display']}**")
+            if c2.button("✅ Yes", key=f"yes_{item['id']}"):
                 save_sample(item['word'], item['sequence'])
                 ts = datetime.now().strftime("%H:%M:%S")
-                st.session_state.save_log.append(f"[{ts}]  '{item['display']}' saved")
-                st.session_state.pending_confirmations = [
-                    p for p in st.session_state.pending_confirmations
-                    if p['id'] != item['id']
-                ]
+                st.session_state.save_log.append(f"[{ts}] '{item['display']}' saved")
+                st.session_state.pending_confirmations = [p for p in st.session_state.pending_confirmations if p['id'] != item['id']]
                 st.rerun()
-
-            if col_no.button("❌ No", key=f"no_{item['id']}"):
-                display = item['display']
-                if display in st.session_state.sentence:
-                    st.session_state.sentence.remove(display)
-                st.session_state.pending_confirmations = [
-                    p for p in st.session_state.pending_confirmations
-                    if p['id'] != item['id']
-                ]
+            if c3.button("❌ No", key=f"no_{item['id']}"):
+                if item['display'] in st.session_state.sentence:
+                    st.session_state.sentence.remove(item['display'])
+                st.session_state.pending_confirmations = [p for p in st.session_state.pending_confirmations if p['id'] != item['id']]
                 if st.session_state.last_word == item['word']:
                     st.session_state.last_word = ""
                 st.rerun()
     else:
-        st.caption("*Words will appear here once they are recognized & camera feed is stopped...*")
+        st.caption("*Words appear here as they are recognized...*")
 
     st.markdown("---")
-
     st.subheader("Saved Samples")
-    st.caption("Confirmed words are saved immediately as numeric feature sequences")
+    st.caption("Confirmed words saved as numeric feature sequences")
     if st.session_state.save_log:
         for entry in st.session_state.save_log[-5:]:
             st.markdown(f"✅ `{entry}`")
     else:
-        st.caption("*No samples saved yet in this session*")
+        st.caption("*No samples saved yet*")
+
+# ─── READ FROM VIDEO PROCESSOR ───
+# TOPIC: Reading processor state from outside recv()
+# WHY: recv() runs in a background thread. We read its output here
+# in the main Streamlit thread to update the UI and session_state.
+# This is the standard streamlit-webrtc pattern for passing data out.
+if ctx.video_processor:
+    vp = ctx.video_processor
+    if vp.current_word:
+        color = "green" if vp.current_conf >= 0.55 else "orange"
+        sign_ph.markdown(f"### {vp.current_word}")
+        conf_ph.progress(min(vp.current_conf, 1.0), text=f"{vp.current_conf*100:.0f}% confident")
+
+    # Pick up new word detections
+    if vp.new_word and vp.new_word != st.session_state.last_word:
+        word    = vp.new_word
+        display = word.replace('_', ' ')
+        st.session_state.sentence.append(display)
+        st.session_state.last_word = word
+        st.session_state.confirm_id_counter += 1
+        st.session_state.pending_confirmations.append({
+            "id": st.session_state.confirm_id_counter,
+            "word": word, "display": display,
+            "sequence": vp.snapshot or []
+        })
+        if len(st.session_state.pending_confirmations) > 10:
+            st.session_state.pending_confirmations.pop(0)
+        if len(st.session_state.sentence) > 12:
+            st.session_state.sentence.pop(0)
+        vp.new_word = None   # clear so we don't pick it up again
+
+    if st.session_state.sentence:
+        sent_ph.markdown("**" + "  →  ".join(st.session_state.sentence) + "**")
 
 st.divider()
 
-run = st.checkbox("▶️  Start Camera")
-
-ctrl1, ctrl2 = st.columns([3, 1])
-with ctrl1:
-    threshold = st.slider("Confidence Threshold", 0.3, 0.95, 0.65, 0.05)
-with ctrl2:
-    clear_btn = st.button("🗑️  Clear All", use_container_width=True)
-
+threshold = st.slider("Confidence Threshold", 0.3, 0.95, 0.65, 0.05)
+clear_btn = st.button("🗑️  Clear All")
 if clear_btn:
-    st.session_state.sentence              = []
-    st.session_state.last_word             = ""
-    st.session_state.pending_confirmations = []
-    st.rerun()
+    st.session_state.sentence = []; st.session_state.last_word = ""
+    st.session_state.pending_confirmations = []; st.rerun()
 
 st.divider()
 
@@ -219,100 +290,7 @@ with st.expander("📋  Browse All 50 ISL Signs"):
     cols = st.columns(5)
     for i, word in enumerate(ALL_CLASSES):
         display = word.replace('_', ' ')
-        n       = saved_counts.get(word, 0)
-        label   = f"{display}  ✦{n}" if n > 0 else display
-        cols[i % 5].markdown(f"- {label}")
+        n = saved_counts.get(word, 0)
+        cols[i % 5].markdown(f"- {display}{'  ✦'+str(n) if n>0 else ''}")
     if saved_counts:
-        st.caption("✦ thank you for contributing your word samples")
-
-DISPLAY_WIDTH = 480
-
-if run:
-    cap      = cv2.VideoCapture(0)
-    holistic = mp.solutions.holistic.Holistic(
-        static_image_mode=False,
-        model_complexity=1,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
-    mp_draw       = mp.solutions.drawing_utils
-    prev_features = None
-    frame_count   = 0
-    sequence_buffer = []
-    last_sentence   = []
-
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                st.error("❌ Cannot read from webcam.")
-                break
-
-            frame = cv2.flip(frame, 1)
-
-            h, w  = frame.shape[:2]
-            scale = DISPLAY_WIDTH / w
-            display_frame = cv2.resize(frame, (DISPLAY_WIDTH, int(h * scale)))
-
-            rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = holistic.process(rgb)
-
-            if results.left_hand_landmarks:
-                mp_draw.draw_landmarks(display_frame, results.left_hand_landmarks,
-                                       mp.solutions.holistic.HAND_CONNECTIONS)
-            if results.right_hand_landmarks:
-                mp_draw.draw_landmarks(display_frame, results.right_hand_landmarks,
-                                       mp.solutions.holistic.HAND_CONNECTIONS)
-
-            frame_placeholder.image(display_frame, channels="BGR",
-                                    use_container_width=True)
-
-            features      = extract_frame_features(results, prev_features)
-            prev_features = features[:162]
-            sequence_buffer.append(features)
-            if len(sequence_buffer) > 30:
-                sequence_buffer.pop(0)
-
-            frame_count += 1
-            if len(sequence_buffer) == 30 and frame_count % 3 == 0:
-                X     = np.array(sequence_buffer, dtype=np.float32)[np.newaxis, ...]
-                probs = model(X, training=False).numpy()[0]
-                idx   = int(np.argmax(probs))
-                conf  = float(probs[idx])
-                word  = idx_to_word.get(idx, "?")
-                display_word = word.replace('_', ' ')
-
-                if conf >= threshold:
-                    sign_placeholder.markdown(f"### {display_word}")
-                    conf_placeholder.progress(conf, text=f"{conf*100:.0f}% confident")
-
-                    if word != st.session_state.last_word:
-                        st.session_state.sentence.append(display_word)
-                        st.session_state.last_word = word
-
-                        st.session_state.confirm_id_counter += 1
-                        st.session_state.pending_confirmations.append({
-                            "id":       st.session_state.confirm_id_counter,
-                            "word":     word,
-                            "display":  display_word,
-                            "sequence": list(sequence_buffer)
-                        })
-
-                        if len(st.session_state.pending_confirmations) > 10:
-                            st.session_state.pending_confirmations.pop(0)
-
-                        if len(st.session_state.sentence) > 12:
-                            st.session_state.sentence.pop(0)
-                else:
-                    sign_placeholder.markdown("### ...")
-                    conf_placeholder.progress(0.0, text="Waiting for clear sign...")
-
-            if st.session_state.sentence != last_sentence:
-                sent_placeholder.markdown(
-                    "**" + "  →  ".join(st.session_state.sentence) + "**"
-                )
-                last_sentence = list(st.session_state.sentence)
-
-    finally:
-        cap.release()
-        holistic.close()
+        st.caption("✦ = your contributed samples for that sign")

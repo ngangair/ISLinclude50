@@ -1,5 +1,3 @@
-# requirements.txt
-# for use 
 # refresh deploy
 
 tensorflow==2.17.1

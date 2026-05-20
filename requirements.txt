@@ -3,7 +3,7 @@
 tensorflow==2.17.1
 mediapipe==0.10.14
 streamlit==1.57.0
-opencv-python-headless==4.11.0.86
+opencv-python-headless==4.10.0.84
 numpy==1.26.4
 scikit-learn
 pandas

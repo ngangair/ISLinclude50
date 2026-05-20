@@ -1,12 +1,9 @@
 # refresh deploy
 
-streamlit==1.57.0
-tensorflow==2.17.1
-mediapipe==0.10.14
-opencv-python-headless==4.10.0.84
+tensorflow==2.15.0
+keras==2.15.0
 numpy==1.26.4
-scikit-learn
-pandas
-matplotlib
-h5py
-protobuf==4.25.9
+h5py==3.10.0
+mediapipe==0.10.14
+streamlit==1.35.0
+opencv-python-headless==4.10.0.84

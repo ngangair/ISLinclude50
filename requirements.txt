@@ -3,7 +3,7 @@
 
 tensorflow-cpu==2.17.1
 mediapipe==0.10.14
-streamlit
-opencv-python-headless
-numpy
+streamlit==1.57.0
+opencv-python-headless==4.11.0.86
+numpy==1.26.4
 scikit-learn

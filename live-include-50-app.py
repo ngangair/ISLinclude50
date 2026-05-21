@@ -290,4 +290,4 @@ with st.expander("📋  Browse All 50 ISL Signs"):
         n = saved_counts.get(word, 0)
         cols[i % 5].markdown(f"- {display}{'  ✦'+str(n) if n>0 else ''}")
     if saved_counts:
-        st.caption("✦ = your contributed samples for that sign")
+        st.caption("✦ thank you for contributing your word samples")

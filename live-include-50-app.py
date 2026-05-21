@@ -11,7 +11,7 @@ import av
 from datetime import datetime
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
-st.set_page_config(page_title="ISL Live Recognition", layout="wide")
+st.set_page_config(page_title="ISL Include50 Live Recognition", layout="wide")
 
 MODELS_PATH   = "data/models"
 SPLITS_PATH   = "data/splits"
@@ -158,8 +158,8 @@ for k, v in {"sentence":[], "last_word":"", "save_log":[],
     if k not in st.session_state: st.session_state[k] = v
 
 st.markdown("<style>.block-container{padding-top:1.2rem;}</style>", unsafe_allow_html=True)
-st.title("ISL Live Recognition")
-st.caption("Click START to activate your camera — sign — confirm or correct recognized words")
+st.title("ISL Include50 Live Recognition")
+st.caption("Click START to activate your camera | Scroll down to see word list")
 
 m1, m2 = st.columns(2)
 m1.metric("Dataset", "INCLUDE50")
@@ -234,7 +234,7 @@ with panel_col:
                     st.session_state.last_word = ""
                 st.rerun()
     else:
-        st.caption("*Words appear here as they are recognized...*")
+        st.caption("*Words appear here once recognized...*")
 
     st.markdown("---")
     st.subheader("Saved Samples")
